@@ -12,20 +12,22 @@ void dot_prod_with_idx_all_forward_cuda(int N, int M, int h, int hdim, int n_max
 void attention_step2_with_rel_pos_value_forward_cuda(int N, int M, int h, int hdim, int n_max, at::Tensor attn_tensor, at::Tensor v_tensor, at::Tensor index0_offsets_tensor, at::Tensor index1_tensor, at::Tensor table_tensor, at::Tensor rel_idx_tensor, at::Tensor output_tensor);
 void attention_step2_with_rel_pos_value_backward_cuda(int N, int M, int h, int hdim, int L, int n_max, at::Tensor grad_out_tensor, at::Tensor index0_tensor, at::Tensor index0_offsets_tensor, at::Tensor index1_tensor, at::Tensor index1_offsets_tensor, at::Tensor attn_tensor, at::Tensor v_tensor, at::Tensor table_tensor, at::Tensor rel_idx_tensor, at::Tensor grad_attn_tensor, at::Tensor grad_v_tensor, at::Tensor grad_table_tensor);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+// Templated launchers (scalar_t = float/at::Half/at::BFloat16). q/k/v/attn/table/
+// output/grad_q/grad_k/grad_v/grad_out are scalar_t; the atomic-accumulated rel-pos
+// table gradients (grad_table*) stay float* so the cross-block sum is f32-precise
+// even under bf16. Index buffers stay int32. Explicit instantiations live in
+// relative_pos_encoding_cuda_kernel.cu. Not extern "C" — templates have C++ linkage.
+template <typename scalar_t>
+void dot_prod_with_idx_forward_cuda_launcher(int N, int M, int h, int hdim, int n_max, const int L, const scalar_t *q, const int *index_q, const int *index_q_offsets, const scalar_t *k, const int *index_k, const scalar_t *table_q, const scalar_t *table_k, const int *rel_idx, scalar_t *output);
+template <typename scalar_t>
+void dot_prod_with_idx_backward_cuda_launcher(int N, int M, int h, int hdim, int n_max, const int L, const scalar_t *grad_out, const scalar_t *q, const int *index_q_offsets, const scalar_t *k, const int *index_k_offsets, const int *index_k, const scalar_t *table_q, const scalar_t *table_k, const int *rel_idx, scalar_t *grad_q, scalar_t *grad_k, float *grad_table_q, float *grad_table_k);
 
-void dot_prod_with_idx_forward_cuda_launcher(int N, int M, int h, int hdim, int n_max, const int L, const float *q, const int *index_q, const int *index_q_offsets, const float *k, const int *index_k, const float *table_q, const float *table_k, const int *rel_idx, float *output);
-void dot_prod_with_idx_backward_cuda_launcher(int N, int M, int h, int hdim, int n_max, const int L, const float *grad_out, const float *q, const int *index_q_offsets, const float *k, const int *index_k_offsets, const int *index_k, const float *table_q, const float *table_k, const int *rel_idx, float *grad_q, float *grad_k, float *grad_table_q, float *grad_table_k);
+template <typename scalar_t>
+void dot_prod_with_idx_all_forward_cuda_launcher(int N, int M, int h, int hdim, int n_max, const int L, const scalar_t *q, const int *index_q, const int *index_q_offsets, const scalar_t *k, const int *index_k, const scalar_t *table_q, const scalar_t *table_k, const int *rel_idx, scalar_t *output);
 
-void dot_prod_with_idx_all_forward_cuda_launcher(int N, int M, int h, int hdim, int n_max, const int L, const float *q, const int *index_q, const int *index_q_offsets, const float *k, const int *index_k, const float *table_q, const float *table_k, const int *rel_idx, float *output);
+template <typename scalar_t>
+void attention_step2_with_rel_pos_value_forward_cuda_launcher(int N, int M, const int h, int hdim, int n_max, const scalar_t *attn, const scalar_t *v, const int *index0_offsets, const int *index1, const scalar_t *table, const int *rel_idx, scalar_t *output);
+template <typename scalar_t>
+void attention_step2_with_rel_pos_value_backward_cuda_launcher(int N, int M, int h, int hdim, int L, int n_max, const scalar_t *grad_out, const int *index0, const int *index0_offsets, const int *index1, const int *index1_offsets, const scalar_t *attn, const scalar_t *v, const scalar_t *table, const int *rel_idx, scalar_t *grad_attn, scalar_t *grad_v, float *grad_table);
 
-void attention_step2_with_rel_pos_value_forward_cuda_launcher(int N, int M, int h, int hdim, int n_max, const float *attn, const float *v, const int *index0_offsets, const int *index1, const float *table, const int *rel_idx, float *output);
-void attention_step2_with_rel_pos_value_backward_cuda_launcher(int N, int M, int h, int hdim, int L, int n_max, const float *grad_out, const int *index0, const int *index0_offsets, const int *index1, const int *index1_offsets, const float *attn, const float *v, const float *table, const int *rel_idx, float *grad_attn, float *grad_v, float *grad_table);
-
-
-#ifdef __cplusplus
-}
-#endif
 #endif
