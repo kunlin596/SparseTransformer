@@ -58,44 +58,45 @@ __global__ void dot_prod_with_idx_backward_cuda_kernel( // M, h, hdim
     int end = index_q_offsets[q_idx+1];
     int n = end - start;
 
+    // Direct-atomic rel-pos table gradient: the original staged grads in a
+    // dynamically-indexed grad_table_q_reg[50][3] (+ _k below) that the
+    // data-dependent rel_idx spilled to local memory (~1.2 KB/thread), capping
+    // occupancy — the dominant cost in the fp32 profile (job 1618, ~21%). We add
+    // each rel-pos grad straight into global grad_table_q per neighbor (no lmem);
+    // grad_table_q is pre-zeroed by the caller, as the prior cross-block flush
+    // already required. q[..] is loop-invariant, so hoist it.
     float grad_q_val = 0.0;
-    float grad_table_q_reg[50][3] = {0};
+    const float q_val = q[q_idx*C + h_idx*d + d_idx];
     for(int i = 0; i < n; i ++){
         int start_i = start + i;
         int rel_idx1 = rel_idx[start_i*3], rel_idx2 = rel_idx[start_i*3 + 1], rel_idx3 = rel_idx[start_i*3 + 2];
         float grad_out_val = grad_out[start_i*h + h_idx];
         grad_q_val += (table_q[rel_idx1*3*C + h_idx*d + d_idx] + table_q[rel_idx2*3*C + C + h_idx*d + d_idx] + table_q[rel_idx3*3*C + 2*C + h_idx*d + d_idx]) * grad_out_val;
         
-        float grad_table_q_val = q[q_idx*C + h_idx*d + d_idx] * grad_out_val;
-        grad_table_q_reg[rel_idx1][0] += grad_table_q_val;
-        grad_table_q_reg[rel_idx2][1] += grad_table_q_val;
-        grad_table_q_reg[rel_idx3][2] += grad_table_q_val;
+        float grad_table_q_val = q_val * grad_out_val;
+        atomicAdd(grad_table_q + rel_idx1*3*C + h_idx*d + d_idx, grad_table_q_val);
+        atomicAdd(grad_table_q + rel_idx2*3*C + C + h_idx*d + d_idx, grad_table_q_val);
+        atomicAdd(grad_table_q + rel_idx3*3*C + 2*C + h_idx*d + d_idx, grad_table_q_val);
     }
 
     grad_q[q_idx*C + h_idx*d + d_idx] = grad_q_val;
-    for(int i = 0; i < L*3; i++){
-        atomicAdd(grad_table_q + i*C + h_idx*d + d_idx, grad_table_q_reg[i/3][i%3]);
-    }
 
     int start_k = index_k_offsets[q_idx];
     float grad_k_val = 0.0;
-    float grad_table_k_reg[50][3] = {0};
+    const float k_val = k[q_idx*C + h_idx*d + d_idx];
     for(int i = 0; i < n; i ++){
         int start_i = start_k + i*n;
         int rel_idx1 = rel_idx[start_i*3], rel_idx2 = rel_idx[start_i*3 + 1], rel_idx3 = rel_idx[start_i*3 + 2];
         float grad_out_val = grad_out[start_i*h + h_idx];
         grad_k_val += (table_k[rel_idx1*3*C + h_idx*d + d_idx] + table_k[rel_idx2*3*C + C + h_idx*d + d_idx] + table_k[rel_idx3*3*C + 2*C + h_idx*d + d_idx]) * grad_out_val;
         
-        float grad_table_k_val = k[q_idx*C + h_idx*d + d_idx] * grad_out_val;
-        grad_table_k_reg[rel_idx1][0] += grad_table_k_val;
-        grad_table_k_reg[rel_idx2][1] += grad_table_k_val;
-        grad_table_k_reg[rel_idx3][2] += grad_table_k_val;
+        float grad_table_k_val = k_val * grad_out_val;
+        atomicAdd(grad_table_k + rel_idx1*3*C + h_idx*d + d_idx, grad_table_k_val);
+        atomicAdd(grad_table_k + rel_idx2*3*C + C + h_idx*d + d_idx, grad_table_k_val);
+        atomicAdd(grad_table_k + rel_idx3*3*C + 2*C + h_idx*d + d_idx, grad_table_k_val);
     }
     
     grad_k[q_idx*C + h_idx*d + d_idx] = grad_k_val;
-    for(int i = 0; i < L*3; i++){
-        atomicAdd(grad_table_k + i*C + h_idx*d + d_idx, grad_table_k_reg[i/3][i%3]);
-    }
 }
 
 void dot_prod_with_idx_backward_cuda_launcher(int N, int M, int h, int hdim, int n_max, const int L, 
@@ -201,7 +202,8 @@ __global__ void attention_step2_with_rel_pos_value_grad_v_table_backward_cuda_ke
     int start = index0_offsets[q_idx], end = index0_offsets[q_idx+1];
     int n = end - start;
     int start_k = index1_offsets[q_idx];
-    float grad_table_reg[50][3] = {0};
+    // direct-atomic rel-pos value-table grad (see dot_prod_with_idx_backward):
+    // no [50][3] lmem-spilled accumulator; ~11% kernel in the fp32 profile (1618).
     float grad_v_val = 0;
     
     for(int i = 0; i < n; i ++){
@@ -212,17 +214,13 @@ __global__ void attention_step2_with_rel_pos_value_grad_v_table_backward_cuda_ke
         
         float grad_val = attn[start_i*h + h_idx] * grad_out_val;
         
-        grad_table_reg[rel_idx1][0] += grad_val;
-        grad_table_reg[rel_idx2][1] += grad_val;
-        grad_table_reg[rel_idx3][2] += grad_val;
+        atomicAdd(grad_table + rel_idx1*3*C + h_idx*hdim + d_idx, grad_val);
+        atomicAdd(grad_table + rel_idx2*3*C + C + h_idx*hdim + d_idx, grad_val);
+        atomicAdd(grad_table + rel_idx3*3*C + 2*C + h_idx*hdim + d_idx, grad_val);
 
         grad_v_val += grad_val;
     }
     grad_v[q_idx*C + h_idx*hdim + d_idx] = grad_v_val;
-
-    for(int i = 0; i < 3*L; i++){
-        atomicAdd(grad_table + i*C + h_idx*hdim + d_idx, grad_table_reg[i/3][i%3]);
-    }
 }
 
 
